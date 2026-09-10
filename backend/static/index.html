@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="en" dir="ltr">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>EyeClinic EMR</title>
+  <link rel="manifest" href="/static/manifest.json">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="EyeClinic">
+  <link rel="apple-touch-icon" href="/static/img/logo.jpg">
+  <script src="/static/vendor/tailwind.js"></script>
+  <script src="/static/vendor/chart.umd.min.js"></script>
+  <script src="/static/vendor/qrcode.min.js"></script>
+  <script src="/static/vendor/jspdf.umd.min.js"></script>
+  <script src="/static/js/i18n.js"></script>
+  <script src="/static/js/api.js"></script>
+  <script src="/static/js/ui.js"></script>
+  <style>
+    [x-cloak]{display:none!important}
+    .page{animation:fade .2s ease}
+    @keyframes fade{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+    .active-nav{background:#eef2ff;color:#3730a3;font-weight:600}
+    .rtl{direction:rtl;text-align:right}
+    ::-webkit-scrollbar{width:8px;height:8px}
+    ::-webkit-scrollbar-thumb{background:#c7d2fe;border-radius:4px}
+    ::-webkit-scrollbar-track{background:transparent}
+    input,select,textarea{color-scheme:light}
+    .print-area{display:none}
+    a[data-nav="/dashboard"].active-nav{background:#e0e7ff;color:#4338ca}
+    a[data-nav="/patients"].active-nav{background:#d1fae5;color:#065f46}
+    a[data-nav="/injections"].active-nav{background:#ffe4e6;color:#9f1239}
+    a[data-nav="/registries"].active-nav{background:#fef3c7;color:#92400e}
+    a[data-nav="/billing"].active-nav{background:#e0f2fe;color:#0c4a6e}
+    a[data-nav="/inventory"].active-nav{background:#ede9fe;color:#5b21b6}
+    a[data-nav="/reports"].active-nav{background:#ccfbf1;color:#134e4a}
+    a[data-nav="/settings"].active-nav{background:#f1f5f9;color:#334155}
+    @media print{
+      #app,#modal-root,#toast-root,.no-print{display:none!important}
+      body{background:#fff!important}
+      .print-area{display:block!important;position:static;width:100%}
+    }
+  </style>
+</head>
+<body class="bg-slate-100 text-slate-800 antialiased">
+  <div id="app"></div>
+  <div id="modal-root"></div>
+  <div id="toast-root" class="fixed bottom-4 right-4 z-[100] space-y-2"></div>
+  <script src="/static/js/app.js"></script>
+  <script src="/static/js/pages/login.js"></script>
+  <script src="/static/js/pages/dashboard.js"></script>
+  <script src="/static/js/pages/patients.js"></script>
+  <script src="/static/js/pages/chart.js"></script>
+  <script src="/static/js/pages/encounter.js"></script>
+  <script src="/static/js/pages/injections.js"></script>
+  <script src="/static/js/pages/registries.js"></script>
+  <script src="/static/js/pages/billing.js"></script>
+  <script src="/static/js/pages/inventory.js"></script>
+  <script src="/static/js/pages/reports.js"></script>
+  <script src="/static/js/pages/settings.js"></script>
+  <script src="/static/js/pages/mobile-add.js"></script>
+  <script>
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/static/sw.js').catch(()=>{});
+    }
+  </script>
+</body>
+</html>
