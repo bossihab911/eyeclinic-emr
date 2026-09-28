@@ -18,6 +18,64 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 DB = os.path.join(HERE, "data", "emr.db")
 STATIC = os.path.join(HERE, "static")
 UPLOAD_ROOT = os.path.join(HERE, "data", "uploads")
+
+# ── Cloud-safe startup: ensure data dirs + init SQLite from schema.sql ──
+# On Render the `backend/data` folder is either empty (fresh deploy) or a
+# persistent disk mount. Without this, the first request crashes with
+# "no such table" because emr.db doesn't exist in the cloud container.
+def ensure_db():
+    try:
+        os.makedirs(os.path.join(HERE, "data"), exist_ok=True)
+        os.makedirs(UPLOAD_ROOT, exist_ok=True)
+        need_init = True
+        if os.path.exists(DB):
+            try:
+                ck = sqlite3.connect(DB)
+                r = ck.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table' AND name='users'"
+                ).fetchone()
+                ck.close()
+                need_init = r is None
+            except Exception:
+                need_init = True
+        if need_init:
+            schema_path = os.path.join(HERE, "schema.sql")
+            if os.path.exists(schema_path):
+                con = sqlite3.connect(DB)
+                with open(schema_path, encoding="utf-8") as f:
+                    con.executescript(f.read())
+                con.commit()
+                # Bootstrap minimal login if fresh DB (cloud first boot):
+                # admin/admin123 + ophthalmologist role, so you can log in
+                # immediately at https://eyeclinic-emr.onrender.com
+                try:
+                    n = con.execute("SELECT COUNT(*) FROM users").fetchone()[0]
+                    if n == 0:
+                        import hashlib as _hl, secrets as _sec, json as _js
+                        salt = _sec.token_hex(16)
+                        pw = _hl.pbkdf2_hmac("sha256", b"admin123",
+                                             bytes.fromhex(salt), 120000).hex()
+                        con.execute(
+                            "INSERT OR IGNORE INTO roles(name,label_en,label_ar,permissions)"
+                            " VALUES('admin','Administrator','مدير النظام','{\"admin\": true}')")
+                        rid = con.execute(
+                            "SELECT id FROM roles WHERE name='admin'").fetchone()[0]
+                        con.execute(
+                            "INSERT INTO users(username,password_hash,salt,role_id,name_en,name_ar)"
+                            " VALUES('admin',?,?,?, 'System Admin','مدير النظام')",
+                            (pw, salt, rid))
+                        con.commit()
+                        print("Bootstrapped admin/admin123")
+                except Exception as e:
+                    print("Bootstrap admin failed:", e)
+                con.close()
+                print("DB initialized from schema.sql ->", DB)
+            else:
+                print("WARNING: schema.sql not found, DB not initialized")
+    except Exception as e:
+        print("DB init failed:", e)
+
+ensure_db()
 try:
     from werkzeug.utils import secure_filename
 except Exception:
@@ -1067,6 +1125,9 @@ def backup_now():
     folder = (cfg.get("backup_folder") or "").strip()
     if not folder:
         return {"error": "no_backup_folder"}
+    # Cloud-safe: ignore a Windows local path (e.g. C:\Users\...) when running on Linux/Render.
+    if os.name != "nt" and (":\\" in folder or folder.startswith("C:") or folder.startswith("C/")):
+        return {"error": "backup_folder is a Windows local path, set a cloud folder or disable backup"}
     folder = os.path.abspath(os.path.expandvars(os.path.expanduser(folder)))
     if not os.path.isdir(folder):
         try:
@@ -1129,6 +1190,82 @@ def run_backup_endpoint():
         return jsonify({"error": res["error"]}), 500
     audit("backup", "system", details={"file": res.get("file"), "folder": res.get("folder")})
     return jsonify(res)
+
+# ── CLOUD BACKUP / GOOGLE DRIVE ─────────────────────────────────────
+# Env vars on Render: GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_DRIVE_FOLDER_ID
+
+@app.get("/api/settings/cloud-backup")
+@require_role("admin")
+def cloud_backup_status():
+    try:
+        from cloud_backup import gdrive_status
+        st = gdrive_status()
+    except Exception as e:
+        st = {"configured": False, "error": "cloud module missing: " + str(e)}
+    cfg = get_config()
+    st.update({
+        "auto_cloud_backup": bool(cfg.get("auto_cloud_backup", True)),
+        "last_cloud_backup": cfg.get("last_cloud_backup"),
+        "last_cloud_file": cfg.get("last_cloud_file"),
+        "last_cloud_link": cfg.get("last_cloud_link"),
+    })
+    return jsonify(st)
+
+
+@app.post("/api/settings/cloud-backup")
+@require_role("admin")
+def set_cloud_backup():
+    body = request.get_json(force=True, silent=True) or {}
+    cfg = set_config(auto_cloud_backup=bool(body.get("auto_cloud_backup", True)))
+    return jsonify({"ok": True, "auto_cloud_backup": cfg.get("auto_cloud_backup")})
+
+
+@app.post("/api/backup/cloud")
+@require_role("admin")
+def run_cloud_backup():
+    try:
+        from cloud_backup import build_backup_zip, upload_backup_zip, gdrive_status
+    except Exception as e:
+        return jsonify({"error": "cloud module missing: " + str(e)}), 500
+    st = gdrive_status()
+    if not st.get("configured"):
+        return jsonify({"error": st.get("error") or "Google Drive not linked. Set GOOGLE_DRIVE_FOLDER_ID + GOOGLE_SERVICE_ACCOUNT_JSON in Render env vars."}), 400
+    zpath = None
+    try:
+        zpath = build_backup_zip(DB, HERE)
+        res = upload_backup_zip(zpath)
+        if res.get("error"):
+            return jsonify({"error": res["error"]}), 500
+        set_config(last_cloud_backup=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                   last_cloud_file=res.get("name"), last_cloud_file_id=res.get("file_id"),
+                   last_cloud_link=res.get("link"))
+        audit("cloud_backup", "system", details={"file": res.get("name"), "link": res.get("link")})
+        return jsonify({"ok": True, **res})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+    finally:
+        try:
+            if zpath and os.path.exists(zpath):
+                os.remove(zpath)
+                td = os.path.dirname(zpath)
+                if "emr_backup_" in td:
+                    shutil.rmtree(td, ignore_errors=True)
+        except Exception:
+            pass
+
+
+@app.get("/api/backup/download")
+@require_role("admin")
+def download_backup():
+    """Download a fresh .zip backup directly (then manually upload to Drive/Dropbox/OneDrive)."""
+    try:
+        from cloud_backup import build_backup_zip
+        zpath = build_backup_zip(DB, HERE)
+        d = os.path.dirname(zpath)
+        fn = os.path.basename(zpath)
+        return send_from_directory(d, fn, as_attachment=True)
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 @app.post("/api/backup/restore")
 @require_role("admin")
@@ -1198,11 +1335,37 @@ def _auto_backup_loop():
     time.sleep(15)
     while True:
         cfg = get_config()
-        if cfg.get("backup_folder"):
+        folder = (cfg.get("backup_folder") or "").strip()
+        # Skip Windows local backup path when running in cloud Linux container
+        is_windows_path = ":\\" in folder or folder.startswith("C:")
+        if folder and not (os.name != "nt" and is_windows_path):
             try:
                 backup_now()
             except Exception:
                 pass
+        # Auto daily Google Drive upload (if linked + enabled)
+        try:
+            auto_cloud = cfg.get("auto_cloud_backup", True)
+            if auto_cloud and os.environ.get("GOOGLE_DRIVE_FOLDER_ID"):
+                from cloud_backup import build_backup_zip, upload_backup_zip, gdrive_status
+                if gdrive_status().get("configured"):
+                    zpath = build_backup_zip(DB, HERE)
+                    try:
+                        res = upload_backup_zip(zpath)
+                        if res.get("ok"):
+                            set_config(
+                                last_cloud_backup=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                last_cloud_file=res.get("name"),
+                                last_cloud_file_id=res.get("file_id"),
+                                last_cloud_link=res.get("link"))
+                    finally:
+                        try:
+                            if os.path.exists(zpath):
+                                os.remove(zpath)
+                        except Exception:
+                            pass
+        except Exception:
+            pass
         time.sleep(24 * 3600)
 
 if __name__ == "__main__":

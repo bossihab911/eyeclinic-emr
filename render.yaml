@@ -4,7 +4,28 @@ services:
     env: python
     rootDir: backend
     buildCommand: pip install -r requirements.txt
-    startCommand: python app.py
+    # Render sets $PORT automatically. gunicorn is required for production
+    # (Flask dev server `python app.py` will timeout / sleep on Render).
+    startCommand: gunicorn app:app --bind 0.0.0.0:$PORT --workers 2 --timeout 120
+    autoDeploy: true
+    healthCheckPath: /
     envVars:
       - key: HOST
         value: 0.0.0.0
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      # Google Drive cloud backup (set in Render Dashboard > Environment):
+      - key: GOOGLE_DRIVE_FOLDER_ID
+        sync: false
+      - key: GOOGLE_SERVICE_ACCOUNT_JSON
+        sync: false
+      - key: AUTO_CLOUD_BACKUP
+        value: 1
+    # Persistent disk — REQUIRED for real clinic use.
+    # SQLite stores patients in backend/data/emr.db. Without a disk,
+    # Render's filesystem is ephemeral and ALL data is wiped on every
+    # restart / redeploy. Note: disks need a paid instance (Starter $7/mo+).
+    disk:
+      name: emr-data
+      mountPath: /opt/render/project/src/backend/data
+      sizeGB: 1

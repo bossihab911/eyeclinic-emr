@@ -37,6 +37,15 @@ app.register("/settings", async () => {
     }
     view.innerHTML = `<div class="max-w-xl bg-white rounded-xl border border-slate-200 shadow-sm p-6">
       <h3 class="text-sm font-bold text-slate-700 mb-1">☁️ Google Drive backup</h3>
+      <p class="text-xs text-slate-400 mb-3">On the cloud server (Render) backups upload straight to your shared Drive folder every 24h. On your clinic PC you can also use a local Drive sync folder.</p>
+      <div id="cloud-box" class="bg-slate-50 border border-slate-200 rounded-lg p-3 mb-4 text-xs text-slate-600">Checking Drive link…</div>
+      <div class="flex gap-2 mb-3 flex-wrap">
+        <button data-cloud-bk class="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold rounded-lg">☁️ Upload to Drive now</button>
+        <a data-dl-bk href="#/settings" class="px-4 py-2 bg-slate-600 hover:bg-slate-700 text-white text-sm font-semibold rounded-lg">⬇ Download .zip</a>
+        <span id="cloud-status" class="text-xs text-slate-400 self-center"></span>
+      </div>
+      <label class="flex items-center gap-2 text-xs text-slate-500 mb-4"><input type="checkbox" id="cloud-auto" checked> Auto-upload to Drive daily</label>
+      <h3 class="text-sm font-bold text-slate-700 mb-1">💻 Local folder backup (clinic PC only)</h3>
       <p class="text-xs text-slate-400 mb-4">Point the folder to your local Google Drive sync folder (e.g. C:\\Users\\you\\My Drive\\EMR Backup). The app writes a timestamped .zip there; Drive syncs it to the cloud. Auto backup runs daily.</p>
       <label class="block text-xs font-semibold text-slate-500 mb-1">Backup folder path</label>
       <div class="flex gap-2 mb-3">
@@ -61,6 +70,36 @@ app.register("/settings", async () => {
     const inp = view.querySelector("#bk-folder");
     const info = view.querySelector("#bk-info");
     const status = view.querySelector("#bk-status");
+    const cloudBox = view.querySelector("#cloud-box");
+    const cloudStatus = view.querySelector("#cloud-status");
+    const cloudAuto = view.querySelector("#cloud-auto");
+    const dlBtn = view.querySelector("[data-dl-bk]");
+    try {
+      const cc = await api.get("/settings/cloud-backup");
+      cloudAuto.checked = cc.auto_cloud_backup !== false;
+      if (cc.configured) {
+        cloudBox.innerHTML = `✅ Linked${cc.service_email ? " as <b>" + ui.esc(cc.service_email) + "</b>" : ""} · Last upload: ${ui.esc(cc.last_cloud_backup || "—")} ${cc.last_cloud_link ? `· <a class="text-blue-600 underline" target="_blank" href="${ui.esc(cc.last_cloud_link)}">open in Drive</a>` : ""}`;
+      } else {
+        cloudBox.innerHTML = `❌ Not linked yet — set <b>GOOGLE_DRIVE_FOLDER_ID</b> + <b>GOOGLE_SERVICE_ACCOUNT_JSON</b> in Render → Environment, then redeploy. ${ui.esc(cc.error || "")}`;
+      }
+    } catch (e) { cloudBox.textContent = "Drive status: " + e.message; }
+    cloudAuto.addEventListener("change", async () => {
+      try { await api.request("/settings/cloud-backup", { method: "POST", body: { auto_cloud_backup: cloudAuto.checked } }); ui.toast("Saved ✓", "success"); }
+      catch (e) { ui.toast(ui.esc(e.message), "error"); }
+    });
+    view.querySelector("[data-cloud-bk]").addEventListener("click", async () => {
+      cloudStatus.textContent = "Uploading…";
+      try {
+        const r = await api.request("/backup/cloud", { method: "POST", body: {} });
+        cloudStatus.innerHTML = `Done: ${ui.esc(r.name || "")} <a class="text-blue-600 underline" target="_blank" href="${ui.esc(r.link || "")}">open</a>`;
+        ui.toast("Uploaded to Drive ✓", "success");
+      } catch (e) { cloudStatus.textContent = ""; ui.toast(ui.esc(e.message || "upload failed"), "error"); }
+    });
+    dlBtn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      const token = localStorage.getItem("ophthalmo_token") || "";
+      window.open("/api/backup/download?token=" + encodeURIComponent(token), "_blank");
+    });
     try {
       const cfg = await api.get("/settings/backup");
       inp.value = cfg.backup_folder || "";
