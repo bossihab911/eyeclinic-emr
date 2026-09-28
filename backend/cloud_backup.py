@@ -1,14 +1,11 @@
 """Google Drive cloud backup for EyeClinic EMR.
 
-Reads credentials from Render env vars (no secrets in git):
-  GOOGLE_SERVICE_ACCOUNT_JSON — full JSON content of a Google service account key
-    (or set GOOGLE_SERVICE_ACCOUNT_FILE to a file path containing it)
-  GOOGLE_DRIVE_FOLDER_ID — Drive folder ID to upload into (service account must
-    be added as Editor on that folder via Share)
-  AUTO_CLOUD_BACKUP — "1" to enable daily auto-upload (can also be toggled in UI)
-
-Usage from app.py:
-  from cloud_backup import gdrive_status, upload_backup_zip
+Two modes (OAuth preferred for free Gmail):
+  OAUTH (recommended, uses YOUR storage quota):
+    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
+    + GOOGLE_DRIVE_FOLDER_ID
+  SERVICE ACCOUNT (Workspace Shared Drives only, free Gmail has no quota):
+    GOOGLE_SERVICE_ACCOUNT_JSON + GOOGLE_DRIVE_FOLDER_ID
 """
 import io
 import json
@@ -37,13 +34,30 @@ def _load_service_info():
     return None
 
 
+def _load_oauth_creds():
+    cid = (os.environ.get("GOOGLE_CLIENT_ID") or "").strip()
+    csec = (os.environ.get("GOOGLE_CLIENT_SECRET") or "").strip()
+    rtok = (os.environ.get("GOOGLE_REFRESH_TOKEN") or "").strip()
+    if cid and csec and rtok:
+        return {"client_id": cid, "client_secret": csec, "refresh_token": rtok}
+    return None
+
+
 def gdrive_status():
-    info = _load_service_info()
     folder = (os.environ.get("GOOGLE_DRIVE_FOLDER_ID") or "").strip()
+    oauth = _load_oauth_creds()
+    if oauth:
+        return {"configured": True, "mode": "oauth (your quota)",
+                "has_service_account": False, "folder_set": bool(folder),
+                "service_email": "your Google account"}
+    info = _load_service_info()
     if isinstance(info, dict) and info.get("_error"):
-        return {"configured": False, "error": info["_error"], "folder_set": bool(folder)}
+        return {"configured": False, "mode": "service-account",
+                "error": info["_error"] + " — TIP: free Gmail needs OAuth (GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN), service accounts have no quota.",
+                "folder_set": bool(folder)}
     return {
         "configured": bool(info and folder),
+        "mode": "service-account (Workspace only)",
         "has_service_account": bool(info),
         "folder_set": bool(folder),
         "service_email": (info or {}).get("client_email", "") if isinstance(info, dict) else "",
@@ -79,23 +93,40 @@ def build_backup_zip(db_path, here_dir):
 
 def upload_backup_zip(zpath):
     """Upload a .zip file to the configured Google Drive folder. Returns dict."""
-    from google.oauth2 import service_account
     from googleapiclient.discovery import build
     from googleapiclient.http import MediaFileUpload
 
-    info = _load_service_info()
-    if not info or (isinstance(info, dict) and info.get("_error")):
-        err = (info or {}).get("_error") if isinstance(info, dict) else None
-        return {"error": err or "Google Drive not linked: set GOOGLE_SERVICE_ACCOUNT_JSON env var"}
     folder = (os.environ.get("GOOGLE_DRIVE_FOLDER_ID") or "").strip()
     if not folder:
         return {"error": "Google Drive not linked: set GOOGLE_DRIVE_FOLDER_ID env var"}
+    name = os.path.basename(zpath)
+    meta = {"name": name, "parents": [folder]}
+
+    # 1) OAuth user mode — works on free Gmail (uses YOUR quota)
+    oauth = _load_oauth_creds()
+    if oauth:
+        from google.oauth2.credentials import Credentials
+        creds = Credentials(
+            None, refresh_token=oauth["refresh_token"],
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=oauth["client_id"], client_secret=oauth["client_secret"],
+            scopes=["https://www.googleapis.com/auth/drive.file"])
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        media = MediaFileUpload(zpath, mimetype="application/zip", resumable=False)
+        created = service.files().create(body=meta, media_body=media,
+                                         fields="id, name, webViewLink").execute()
+        return {"ok": True, "file_id": created.get("id"),
+                "name": created.get("name"), "link": created.get("webViewLink", "")}
+
+    # 2) Service-account fallback — only works on paid Workspace Shared Drives
+    from google.oauth2 import service_account
+    info = _load_service_info()
+    if not info or (isinstance(info, dict) and info.get("_error")):
+        return {"error": "Free Gmail blocks service accounts (no quota). Set GOOGLE_CLIENT_ID + GOOGLE_CLIENT_SECRET + GOOGLE_REFRESH_TOKEN instead."}
 
     creds = service_account.Credentials.from_service_account_info(
         info, scopes=["https://www.googleapis.com/auth/drive.file"])
     service = build("drive", "v3", credentials=creds, cache_discovery=False)
-    name = os.path.basename(zpath)
-    meta = {"name": name, "parents": [folder]}
     media = MediaFileUpload(zpath, mimetype="application/zip", resumable=True)
     created = service.files().create(body=meta, media_body=media, fields="id, name, webViewLink").execute()
     return {"ok": True, "file_id": created.get("id"),

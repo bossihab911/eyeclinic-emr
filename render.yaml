@@ -15,8 +15,16 @@ services:
       - key: PYTHON_VERSION
         value: 3.11.0
       # Google Drive cloud backup (set in Render Dashboard > Environment):
+      # OAuth mode (free Gmail, recommended):
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_REFRESH_TOKEN
+        sync: false
       - key: GOOGLE_DRIVE_FOLDER_ID
         sync: false
+      # Legacy service-account mode (Workspace Shared Drives only):
       - key: GOOGLE_SERVICE_ACCOUNT_JSON
         sync: false
       - key: AUTO_CLOUD_BACKUP
