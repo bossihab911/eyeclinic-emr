@@ -1,11 +1,8 @@
-"""Google Drive cloud backup for EyeClinic EMR.
+"""Cloud backup for EyeClinic EMR — Google Drive + Dropbox.
 
-Two modes (OAuth preferred for free Gmail):
-  OAUTH (recommended, uses YOUR storage quota):
-    GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REFRESH_TOKEN
-    + GOOGLE_DRIVE_FOLDER_ID
-  SERVICE ACCOUNT (Workspace Shared Drives only, free Gmail has no quota):
-    GOOGLE_SERVICE_ACCOUNT_JSON + GOOGLE_DRIVE_FOLDER_ID
+Drive OAuth (free Gmail): GOOGLE_CLIENT_ID/SECRET/REFRESH_TOKEN + GOOGLE_DRIVE_FOLDER_ID
+Dropbox (simplest): DROPBOX_APP_KEY + DROPBOX_APP_SECRET + DROPBOX_REFRESH_TOKEN
+  (+ optional DROPBOX_FOLDER, default /EMR Backup)
 """
 import io
 import json
@@ -131,3 +128,76 @@ def upload_backup_zip(zpath):
     created = service.files().create(body=meta, media_body=media, fields="id, name, webViewLink").execute()
     return {"ok": True, "file_id": created.get("id"),
             "name": created.get("name"), "link": created.get("webViewLink", "")}
+
+
+# ── DROPBOX (simplest, 1 app + refresh token, no test users) ──────────
+
+def _dropbox_creds():
+    key = (os.environ.get("DROPBOX_APP_KEY") or "").strip()
+    sec = (os.environ.get("DROPBOX_APP_SECRET") or "").strip()
+    rtok = (os.environ.get("DROPBOX_REFRESH_TOKEN") or "").strip()
+    # Legacy long-lived token fallback
+    legacy = (os.environ.get("DROPBOX_ACCESS_TOKEN") or "").strip()
+    if key and sec and rtok:
+        return {"key": key, "secret": sec, "refresh": rtok}
+    if legacy:
+        return {"legacy_token": legacy}
+    return None
+
+
+def dropbox_status():
+    c = _dropbox_creds()
+    folder = (os.environ.get("DROPBOX_FOLDER") or "/EMR Backup").strip() or "/EMR Backup"
+    if not c:
+        return {"configured": False, "folder": folder}
+    return {"configured": True, "folder": folder,
+            "mode": "refresh-token" if "refresh" in c else "access-token"}
+
+
+def _dropbox_access_token():
+    import requests
+    c = _dropbox_creds()
+    if not c:
+        return None, "Dropbox not linked: set DROPBOX_APP_KEY/SECRET/REFRESH_TOKEN"
+    if "legacy_token" in c:
+        return c["legacy_token"], None
+    try:
+        r = requests.post("https://api.dropbox.com/oauth2/token",
+                          data={"grant_type": "refresh_token",
+                                "refresh_token": c["refresh"],
+                                "client_id": c["key"],
+                                "client_secret": c["secret"]}, timeout=30)
+        j = r.json()
+        if "access_token" not in j:
+            return None, "Dropbox refresh failed: " + r.text[:300]
+        return j["access_token"], None
+    except Exception as e:
+        return None, "Dropbox token error: " + str(e)
+
+
+def upload_to_dropbox(zpath):
+    """Upload zip to Dropbox /EMR Backup. Returns dict."""
+    import requests
+    tok, err = _dropbox_access_token()
+    if err:
+        return {"error": err}
+    folder = (os.environ.get("DROPBOX_FOLDER") or "/EMR Backup").strip() or "/EMR Backup"
+    if not folder.startswith("/"):
+        folder = "/" + folder
+    dest = folder.rstrip("/") + "/" + os.path.basename(zpath)
+    try:
+        with open(zpath, "rb") as f:
+            data = f.read()
+        r = requests.post("https://content.dropboxapi.com/2/files/upload",
+                          headers={"Authorization": "Bearer " + tok,
+                                   "Content-Type": "application/octet-stream",
+                                   "Dropbox-API-Arg": json.dumps(
+                                       {"path": dest, "mode": "add", "autorename": True})},
+                          data=data, timeout=120)
+        if r.status_code not in (200, 201):
+            return {"error": "Dropbox upload failed: " + r.text[:500]}
+        j = r.json()
+        return {"ok": True, "name": os.path.basename(j.get("path_display", dest)),
+                "path": j.get("path_display", dest), "size": j.get("size")}
+    except Exception as e:
+        return {"error": "Dropbox upload error: " + str(e)}

@@ -1191,25 +1191,30 @@ def run_backup_endpoint():
     audit("backup", "system", details={"file": res.get("file"), "folder": res.get("folder")})
     return jsonify(res)
 
-# ── CLOUD BACKUP / GOOGLE DRIVE ─────────────────────────────────────
-# Env vars on Render: GOOGLE_SERVICE_ACCOUNT_JSON, GOOGLE_DRIVE_FOLDER_ID
+# ── CLOUD BACKUP / GOOGLE DRIVE + DROPBOX ───────────────────────────
 
 @app.get("/api/settings/cloud-backup")
 @require_role("admin")
 def cloud_backup_status():
+    out = {}
     try:
-        from cloud_backup import gdrive_status
-        st = gdrive_status()
+        from cloud_backup import gdrive_status, dropbox_status
+        out["drive"] = gdrive_status()
+        out["dropbox"] = dropbox_status()
+        # backward compat: top-level = drive
+        out.update(out["drive"])
     except Exception as e:
-        st = {"configured": False, "error": "cloud module missing: " + str(e)}
+        out = {"configured": False, "error": "cloud module missing: " + str(e)}
     cfg = get_config()
-    st.update({
+    out.update({
         "auto_cloud_backup": bool(cfg.get("auto_cloud_backup", True)),
         "last_cloud_backup": cfg.get("last_cloud_backup"),
         "last_cloud_file": cfg.get("last_cloud_file"),
         "last_cloud_link": cfg.get("last_cloud_link"),
+        "last_dropbox_backup": cfg.get("last_dropbox_backup"),
+        "last_dropbox_file": cfg.get("last_dropbox_file"),
     })
-    return jsonify(st)
+    return jsonify(out)
 
 
 @app.post("/api/settings/cloud-backup")
@@ -1223,16 +1228,38 @@ def set_cloud_backup():
 @app.post("/api/backup/cloud")
 @require_role("admin")
 def run_cloud_backup():
+    """?provider=dropbox|drive — defaults to dropbox if linked, else drive."""
     try:
-        from cloud_backup import build_backup_zip, upload_backup_zip, gdrive_status
+        from cloud_backup import (build_backup_zip, upload_backup_zip,
+                                  gdrive_status, dropbox_status, upload_to_dropbox)
     except Exception as e:
         return jsonify({"error": "cloud module missing: " + str(e)}), 500
-    st = gdrive_status()
-    if not st.get("configured"):
-        return jsonify({"error": st.get("error") or "Google Drive not linked. Set GOOGLE_DRIVE_FOLDER_ID + GOOGLE_SERVICE_ACCOUNT_JSON in Render env vars."}), 400
+    provider = (request.args.get("provider") or request.form.get("provider") or "").strip().lower()
+    if not provider:
+        try:
+            provider = "dropbox" if dropbox_status().get("configured") else "drive"
+        except Exception:
+            provider = "drive"
+    # backward compat: POST body {provider:...}
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        if body.get("provider"):
+            provider = str(body["provider"]).lower()
+    except Exception:
+        pass
     zpath = None
     try:
         zpath = build_backup_zip(DB, HERE)
+        if provider == "dropbox":
+            res = upload_to_dropbox(zpath)
+            if res.get("error"):
+                return jsonify({"error": res["error"]}), 500
+            set_config(last_dropbox_backup=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                       last_dropbox_file=res.get("name"),
+                       last_cloud_backup=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                       last_cloud_file=res.get("name"))
+            audit("dropbox_backup", "system", details={"file": res.get("name"), "path": res.get("path")})
+            return jsonify({"ok": True, "provider": "dropbox", **res})
         res = upload_backup_zip(zpath)
         if res.get("error"):
             return jsonify({"error": res["error"]}), 500
@@ -1343,12 +1370,35 @@ def _auto_backup_loop():
                 backup_now()
             except Exception:
                 pass
-        # Auto daily Google Drive upload (if linked + enabled)
+        # Auto daily cloud upload — Dropbox first (simplest), then Drive
         try:
             auto_cloud = cfg.get("auto_cloud_backup", True)
-            if auto_cloud and os.environ.get("GOOGLE_DRIVE_FOLDER_ID"):
-                from cloud_backup import build_backup_zip, upload_backup_zip, gdrive_status
-                if gdrive_status().get("configured"):
+            if auto_cloud:
+                from cloud_backup import (build_backup_zip, upload_backup_zip,
+                                          gdrive_status, dropbox_status, upload_to_dropbox)
+                # Dropbox
+                try:
+                    if dropbox_status().get("configured"):
+                        zpath = build_backup_zip(DB, HERE)
+                        try:
+                            res = upload_to_dropbox(zpath)
+                            if res.get("ok"):
+                                set_config(
+                                    last_dropbox_backup=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    last_dropbox_file=res.get("name"),
+                                    last_cloud_backup=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                                    last_cloud_file=res.get("name"))
+                        finally:
+                            try:
+                                if os.path.exists(zpath):
+                                    os.remove(zpath)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+                # Drive (legacy)
+                if os.environ.get("GOOGLE_DRIVE_FOLDER_ID"):
+                    if gdrive_status().get("configured"):
                     zpath = build_backup_zip(DB, HERE)
                     try:
                         res = upload_backup_zip(zpath)

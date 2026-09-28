@@ -14,8 +14,16 @@ services:
         value: 0.0.0.0
       - key: PYTHON_VERSION
         value: 3.11.0
-      # Google Drive cloud backup (set in Render Dashboard > Environment):
-      # OAuth mode (free Gmail, recommended):
+      # Dropbox cloud backup (simplest — recommended):
+      - key: DROPBOX_APP_KEY
+        sync: false
+      - key: DROPBOX_APP_SECRET
+        sync: false
+      - key: DROPBOX_REFRESH_TOKEN
+        sync: false
+      - key: DROPBOX_FOLDER
+        value: /EMR Backup
+      # Google Drive (OAuth, free Gmail):
       - key: GOOGLE_CLIENT_ID
         sync: false
       - key: GOOGLE_CLIENT_SECRET
