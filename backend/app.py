@@ -1399,7 +1399,7 @@ def _auto_backup_loop():
                 # Drive (legacy)
                 if os.environ.get("GOOGLE_DRIVE_FOLDER_ID"):
                     if gdrive_status().get("configured"):
-                    zpath = build_backup_zip(DB, HERE)
+                        zpath = build_backup_zip(DB, HERE)
                     try:
                         res = upload_backup_zip(zpath)
                         if res.get("ok"):
